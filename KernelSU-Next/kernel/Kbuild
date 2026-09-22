@@ -97,6 +97,19 @@ $(info -- KernelSU-Next version fallback: $(KSU_VERSION_FALLBACK))
 KSU_VERSION := $(KSU_VERSION_FALLBACK)
 endif
 
+# rhode 22.09: u nas KernelSU-Next NIE jest osobnym repo git (wgrane hurtowo do
+# drzewa jadra, patrz commit b2f4adb57), wiec powyzsza detekcja zawsze pada na
+# fallback=1 - manager pokazuje "Nieobsywany/Niezintegrowany" mimo ze hooki
+# dzialaja. Podpinamy realny numer wersji odpowiadajacy pinowi dd074bc
+# (rifsxd/KernelSU-Next, legacy): git history totalCount=2996 do tego commita,
+# wzor Kbuild 30000+commits+200 -> 33196. Aktualizowac przy kazdej zmianie pinu.
+ifndef KSU_VERSION_OVERRIDE
+KSU_VERSION_OVERRIDE := 33196
+endif
+ifndef KSU_VERSION_TAG_OVERRIDE
+KSU_VERSION_TAG_OVERRIDE := v3.4.0-legacy
+endif
+
 # Allow integrators to pin the reported version (e.g. when backporting
 # onto release branches where the commit count does not match releases)
 ifdef KSU_VERSION_OVERRIDE
