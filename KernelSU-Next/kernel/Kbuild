@@ -71,8 +71,13 @@ LPATH := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin
 MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Check if this is a git repository
-# Try to detect Git repo intelligently
-GIT_ROOT := $(shell cd $(MDIR) && $(LPATH) git rev-parse --show-toplevel 2>/dev/null)
+# rhode: KernelSU-Next jest wkopiowane do drzewa (bez własnego .git), więc wersja jest zamrożona
+# z przypiętego commita a54e4fa46c6cc25bcaa055cf14d790194beffed8 (gałąź legacy, 2026-07-29):
+# git rev-list --count HEAD = 2993, git describe --tags --abbrev=0 = v3.2.0-legacy. Aktualizując kopię, podbić oba.
+KSU_GIT_VERSION := 2993
+KSU_GIT_TAG := v3.2.0-legacy
+KSU_GIT_VERSION_VALID := 1
+GIT_ROOT :=
 ifneq ($(GIT_ROOT),)
 KERNEL_GIT_ROOT := $(shell cd $(srctree) && $(LPATH) git rev-parse --show-toplevel 2>/dev/null)
 ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
@@ -87,51 +92,28 @@ endif
 
 # Calculate version if git version is available
 ifdef KSU_GIT_VERSION_VALID
+# ksu_version: major * 30000 + git version for historical reasons
 $(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION) + 200))
 $(info -- KernelSU-Next version: $(KSU_VERSION))
+ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 else
 # If there is no .git directory, use default version
 $(warning "KSU_GIT_VERSION not defined! It is better to make KernelSU-Next a git repository!")
 KSU_VERSION_FALLBACK := 1
 $(info -- KernelSU-Next version fallback: $(KSU_VERSION_FALLBACK))
-KSU_VERSION := $(KSU_VERSION_FALLBACK)
+ccflags-y += -DKSU_VERSION=$(KSU_VERSION_FALLBACK)
 endif
-
-# rhode 22.09: u nas KernelSU-Next NIE jest osobnym repo git (wgrane hurtowo do
-# drzewa jadra, patrz commit b2f4adb57), wiec powyzsza detekcja zawsze pada na
-# fallback=1 - manager pokazuje "Nieobsywany/Niezintegrowany" mimo ze hooki
-# dzialaja. Podpinamy realny numer wersji odpowiadajacy pinowi dd074bc
-# (rifsxd/KernelSU-Next, legacy): git history totalCount=2996 do tego commita,
-# wzor Kbuild 30000+commits+200 -> 33196. Aktualizowac przy kazdej zmianie pinu.
-ifndef KSU_VERSION_OVERRIDE
-KSU_VERSION_OVERRIDE := 33196
-endif
-ifndef KSU_VERSION_TAG_OVERRIDE
-KSU_VERSION_TAG_OVERRIDE := v3.4.0-legacy
-endif
-
-# Allow integrators to pin the reported version (e.g. when backporting
-# onto release branches where the commit count does not match releases)
-ifdef KSU_VERSION_OVERRIDE
-KSU_VERSION := $(KSU_VERSION_OVERRIDE)
-$(info -- KernelSU-Next version override: $(KSU_VERSION))
-endif
-ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 
 ifdef KSU_GIT_VERSION_VALID
 $(eval KSU_VERSION_TAG=$(KSU_GIT_TAG))
+$(info -- KernelSU-Next tag: $(KSU_VERSION_TAG))
+ccflags-y += -DKSU_VERSION_TAG=\"$(KSU_VERSION_TAG)\"
 else
 $(warning "KSU_VERSION_TAG not defined! It is better to make KernelSU-Next a git submodule!")
 KSU_VERSION_TAG_FALLBACK := v0.0.1
-KSU_VERSION_TAG=$(KSU_VERSION_TAG_FALLBACK)
+$(info -- KernelSU-Next tag fallback: $(KSU_VERSION_TAG_FALLBACK))
+ccflags-y += -DKSU_VERSION_TAG=\"$(KSU_VERSION_TAG_FALLBACK)\"
 endif
-
-ifdef KSU_VERSION_TAG_OVERRIDE
-KSU_VERSION_TAG := $(KSU_VERSION_TAG_OVERRIDE)
-endif
-
-$(info -- KernelSU-Next tag: $(KSU_VERSION_TAG))
-ccflags-y += -DKSU_VERSION_TAG=\"$(KSU_VERSION_TAG)\"
 
 ifndef KSU_NEXT_MANAGER_SIZE
 KSU_NEXT_MANAGER_SIZE := 0x3e6
@@ -159,15 +141,6 @@ $(info -- KernelSU-Next: Hook mode: Kprobes)
 ccflags-y += -DKSU_KPROBES_HOOK
 # Let's make it 0, so it would pass.
 HAVE_KSU_HOOK := 0
-endif
-
-ifeq ($(CONFIG_KSU_SYSCALL_TABLE_HOOK), y)
-$(info -- KernelSU-Next: Hook mode: Syscall table patching)
-ccflags-y += -DKSU_SYSCALL_TABLE_HOOK
-HAVE_KSU_HOOK := 0
-kernelsu-objs += hook/patch_memory.o
-kernelsu-objs += hook/syscall_table_hook.o
-kernelsu-objs += infra/symbol_resolver.o
 endif
 
 ifeq ($(CONFIG_KSU_MANUAL_HOOK), y)
@@ -240,13 +213,15 @@ $(shell sed -i 's/return inode->i_security/return selinux_inode(inode)/g' $(srct
 $(shell sed -i 's/\bisec = inode->i_security;/isec = selinux_inode(inode);/' $(srctree)/security/selinux/hooks.c)
 endif
 
-ifneq ($(shell grep -Eq 'selinux_cred\(.*\)' $(srctree)/security/selinux/hooks.c; echo $$?),0)
+ifneq ($(shell grep -q "selinux_cred" $(srctree)/security/selinux/hooks.c; echo $$?),0)
 $(info -- KSU_NEXT: patching selinux/hooks.c for selinux_cred)
 $(shell sed -i 's/tsec = cred->security;/tsec = selinux_cred(cred);/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/const struct task_security_struct \*tsec = cred->security;/const struct task_security_struct *tsec = selinux_cred(cred);/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/const struct task_security_struct \*tsec = current_security();/const struct task_security_struct *tsec = selinux_cred(current_cred());/g' $(srctree)/security/selinux/hooks.c)
+$(shell sed -i 's/rc = selinux_determine_inode_label(current_security())/rc = selinux_determine_inode_label(selinux_cred(current_cred()))/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/old_tsec = current_security();/old_tsec = selinux_cred(current_cred());/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/new_tsec = bprm->cred->security;/new_tsec = selinux_cred(bprm->cred);/g' $(srctree)/security/selinux/hooks.c)
+$(shell sed -i 's/rc = selinux_determine_inode_label(old->security)/rc = selinux_determine_inode_label(selinux_cred(old))/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/tsec = new->security;/tsec = selinux_cred(new);/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/tsec = new_creds->security;/tsec = selinux_cred(new_creds);/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/old_tsec = old->security;/old_tsec = selinux_cred(old);/g' $(srctree)/security/selinux/hooks.c)
@@ -254,8 +229,6 @@ $(shell sed -i 's/const struct task_security_struct \*old_tsec = old->security;/
 $(shell sed -i 's/struct task_security_struct \*tsec = new->security;/struct task_security_struct *tsec = selinux_cred(new);/g' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/__tsec = current_security();/__tsec = selinux_cred(current_cred());/' $(srctree)/security/selinux/hooks.c)
 $(shell sed -i 's/__tsec = __task_cred(p)->security;/__tsec = selinux_cred(__task_cred(p));/' $(srctree)/security/selinux/hooks.c)
-$(shell sed -i 's/current_security()/selinux_cred(current_cred())/g' $(srctree)/security/selinux/hooks.c)
-$(shell sed -i 's/old->security/selinux_cred(old)/g' $(srctree)/security/selinux/hooks.c)
 endif
 
 ifneq ($(shell grep -q "selinux_inode(inode)" $(srctree)/security/selinux/selinuxfs.c; echo $$?),0)
