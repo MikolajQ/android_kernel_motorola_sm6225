@@ -245,6 +245,17 @@ pass_through:
 
 static void hook_selinux_transaction_write(void)
 {
+	// WYŁĄCZONE 22.09 (rhode): ten hook (z commita 9b36ff0f3, 20.09.2026, "selinux_hide: rework
+	// non-functionals in kprobes hook") blokuje BEZWARUNKOWO każdy zapis do /sys/fs/selinux/context
+	// od dowolnego procesu z uid>=10000 z aktywnym seccomp — czyli od KAŻDEJ aplikacji Android, nie
+	// tylko celu ukrywania roota. Efekt: selinux_android_setcontext() w Zygocie pada przy
+	// specjalizacji KAŻDEGO procesu aplikacji (JNI FatalError, SIGABRT) — launcher, telefonia (ims),
+	// MediaProvider, wszystko. Autor w kodzie sam pisze: "Bare minimum gate: block app-uid writes
+	// outright" - świadomie niedokończony placeholder. Reszta tego commita (execveat dla nowego
+	// bionic w innym pliku) zostaje - działa poprawnie. Do podniesienia po naprawie w upstreamie.
+	pr_info("ksu_selinux_hide: context ops->write hook wyłączony (rhode 22.09 - łamał Zygote)\n");
+	return;
+
 	if (orig_selinux_transaction_write)
 		return;
 
