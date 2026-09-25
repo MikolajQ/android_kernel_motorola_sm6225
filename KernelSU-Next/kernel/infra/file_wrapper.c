@@ -17,6 +17,7 @@
 
 #include "objsec.h"
 
+#include "ksu.h"
 #include "klog.h" // IWYU pragma: keep
 #include "selinux/selinux.h"
 
@@ -547,9 +548,16 @@ int ksu_install_file_wrapper(int fd)
 		goto out_put_fd;
 	}
 
+	/*
+	 * rhode: backport z v3.4.0 (tiann/KernelSU#3679). Profil roota może już
+	 * przenieść zadanie do ograniczonej domeny SELinux, więc inode tworzymy
+	 * z uprawnieniami KernelSU; plik nie jest jeszcze opublikowany.
+	 */
+	const struct cred *old_cred = override_creds(ksu_cred);
 	struct file *wrapper_file = ksu_anon_inode_create_getfile_compat(
 		"[ksu_fdwrapper]", &file_wrapper_data->ops, file_wrapper_data,
 		orig_file->f_flags, NULL);
+	revert_creds(old_cred);
 	if (IS_ERR(wrapper_file)) {
 		pr_err("ksu_fdwrapper: getfile failed: %ld\n",
 		       PTR_ERR(wrapper_file));
