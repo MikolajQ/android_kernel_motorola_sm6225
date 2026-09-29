@@ -1006,7 +1006,21 @@ static int goodix_berlin_gesture_setup(struct goodix_ts_core *core_data)
 		gesture_cmd = mod_func(gesture_cmd, 12);
 		ts_info("enable single gesture mode cmd 0x%04x\n", gesture_cmd);
 	}
-	if (gesture_type & TS_MMI_GESTURE_DOUBLE) {
+	core_data->sw_double_tap = false;
+	if ((gesture_type & TS_MMI_GESTURE_DOUBLE) &&
+	    core_data->bus->ic_type == IC_TYPE_BERLIN_D) {
+		/*
+		 * GT9916S firmware on rhode never reports double tap and
+		 * raises bogus IRQs every ~2s with bit 7 cleared, but single
+		 * tap works. Detect double tap in software from single taps.
+		 */
+		gesture_cmd = mod_func(gesture_cmd, 12);
+		core_data->sw_double_tap = !(gesture_type & TS_MMI_GESTURE_SINGLE);
+		core_data->last_single_tap = 0;
+		core_data->gesture_err_cnt = 0;
+		core_data->gesture_recover_cnt = 0;
+		ts_info("enable sw double gesture mode cmd 0x%04x\n", gesture_cmd);
+	} else if (gesture_type & TS_MMI_GESTURE_DOUBLE) {
 		gesture_cmd = mod_func(gesture_cmd, 7);
 		ts_info("enable double gesture mode cmd 0x%04x\n", gesture_cmd);
 	}
@@ -1066,6 +1080,14 @@ static int goodix_ts_mmi_panel_state(struct device *dev,
 		core_data->gesture_enabled = false;
 		break;
 	case TS_MMI_PM_ACTIVE:
+		if (core_data->gesture_recover_cnt) {
+			/* reset alone does not revive a wedged IC */
+			ts_info("power cycle after gesture mode failures");
+			core_data->gesture_recover_cnt = 0;
+			hw_ops->power_on(core_data, false);
+			msleep(50);
+			hw_ops->power_on(core_data, true);
+		}
 		if (hw_ops->resume)
 			hw_ops->resume(core_data);
 		if (core_data->gesture_enabled) {

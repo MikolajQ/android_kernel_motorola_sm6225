@@ -1721,6 +1721,9 @@ static int goodix_ts_input_dev_config(struct goodix_ts_core *core_data)
 #endif
 
 	input_set_capability(input_dev, EV_KEY, KEY_POWER);
+	/* DT2W: wake the screen directly (Moto dt-gesture sensor is not
+	 * usable by SystemUI, it is special-trigger, not one-shot) */
+	input_set_capability(input_dev, EV_KEY, KEY_WAKEUP);
 #ifdef CONFIG_GTP_FOD
 	input_set_capability(input_dev, EV_KEY, BTN_TRIGGER_HAPPY1);
 	input_set_capability(input_dev, EV_KEY, BTN_TRIGGER_HAPPY2);

@@ -599,6 +599,47 @@ static bool panel_power_is_alway_on(struct dsi_panel *panel)
 }
 #endif
 
+/*
+ * Gesture mode (DT2W): the touch IC only needs the panel IO rail (vddio).
+ * Switch the remaining panel supplies so the OLED is fully dark.
+ */
+static void dsi_panel_touch_keep_vddio(struct dsi_panel *panel, bool enable)
+{
+	struct dsi_regulator_info *regs = &panel->power_info;
+	struct dsi_vreg *vreg;
+	int i, rc;
+
+	if (enable) {
+		for (i = 0; i < regs->count; i++) {
+			vreg = &regs->vregs[i];
+			if (!strcmp(vreg->vreg_name, "vddio"))
+				continue;
+			(void)regulator_set_load(vreg->vreg, vreg->enable_load);
+			if (regulator_count_voltages(vreg->vreg) > 0)
+				(void)regulator_set_voltage(vreg->vreg,
+					vreg->min_voltage, vreg->max_voltage);
+			rc = regulator_enable(vreg->vreg);
+			if (rc)
+				DSI_ERR("enable %s failed, rc=%d\n",
+					vreg->vreg_name, rc);
+			if (vreg->post_on_sleep)
+				usleep_range(vreg->post_on_sleep * 1000,
+					vreg->post_on_sleep * 1000 + 10);
+		}
+	} else {
+		for (i = regs->count - 1; i >= 0; i--) {
+			vreg = &regs->vregs[i];
+			if (!strcmp(vreg->vreg_name, "vddio"))
+				continue;
+			(void)regulator_set_load(vreg->vreg, vreg->disable_load);
+			(void)regulator_disable(vreg->vreg);
+			if (vreg->post_off_sleep)
+				usleep_range(vreg->post_off_sleep * 1000,
+					vreg->post_off_sleep * 1000 + 10);
+		}
+	}
+}
+
 static int dsi_panel_power_on(struct dsi_panel *panel)
 {
 	int rc = 0;
@@ -608,6 +649,10 @@ static int dsi_panel_power_on(struct dsi_panel *panel)
 
 	if ((panel->tp_state_check_enable) && (panel->tp_state)) {
 		pr_info("%s: (%s)+power is alway on \n", __func__, panel->name);
+		if (panel->tp_partial_off) {
+			dsi_panel_touch_keep_vddio(panel, true);
+			panel->tp_partial_off = false;
+		}
 		goto exit;
 	}
 
@@ -689,6 +734,10 @@ static int dsi_panel_power_off(struct dsi_panel *panel)
 	if (panel->tp_state_check_enable) {
 			if (panel_power_is_alway_on (panel)) {
 			pr_info("%s: (%s)+power is alway on \n", __func__, panel->name);
+			if (!panel->tp_partial_off) {
+				dsi_panel_touch_keep_vddio(panel, false);
+				panel->tp_partial_off = true;
+			}
 			goto exit;
 		}
 	}
@@ -4277,6 +4326,15 @@ static int dsi_panel_parse_mot_panel_config(struct dsi_panel *panel,
 
 	panel->tp_state_check_enable = of_property_read_bool(of_node,
 				"qcom,tp_state_check_enable");
+#if defined(CONFIG_PANEL_NOTIFICATIONS)
+	/*
+	 * Keep the panel IO supply on while touch is in gesture mode (DT2W).
+	 * Touch IC IO rail is shared with the panel. touch_state stays 0
+	 * unless the touch driver reports gesture mode, so this is a no-op
+	 * for drivers that never call touch_set_state().
+	 */
+	panel->tp_state_check_enable = true;
+#endif
 	return rc;
 }
 

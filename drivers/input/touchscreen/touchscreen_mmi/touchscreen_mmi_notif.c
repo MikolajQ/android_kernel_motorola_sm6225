@@ -17,6 +17,9 @@
 #include <linux/usb.h>
 #include <linux/power_supply.h>
 #include <linux/touchscreen_mmi.h>
+#if defined(CONFIG_PANEL_NOTIFICATIONS)
+#include <linux/panel_notifier.h>
+#endif
 
 #if defined(CONFIG_DRM_DYNAMIC_REFRESH_RATE)
 extern struct blocking_notifier_head dsi_freq_head;
@@ -66,6 +69,11 @@ static int ts_mmi_panel_off(struct ts_mmi_dev *touch_cdev) {
 		}
 #endif
 	}
+#if defined(CONFIG_PANEL_NOTIFICATIONS)
+	/* panel keeps its (shared) supplies on only in gesture mode:
+	 * 1 = low power (gesture), 0 = deep sleep */
+	touch_set_state(IS_GESTURE_MODE ? 1 : 0, TOUCH_PANEL_IDX_PRIMARY);
+#endif
 	if (IS_ACTIVE_MODE) {
 		/* IC power is off. IRQ pin status is floated. So disable IRQ. */
 		dev_info(DEV_MMI, "%s: try to enter Deepsleep mode\n", __func__);

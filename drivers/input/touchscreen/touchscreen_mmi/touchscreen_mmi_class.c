@@ -352,6 +352,11 @@ static ssize_t gesture_store(struct device *dev,
 		mutex_unlock(&touch_cdev->extif_mutex);
 		return -EINVAL;
 	}
+	/* LineageOS power HAL (tap_to_wake_node) writes plain 1/0 */
+	if (value == 1)
+		value = 0x31;
+	else if (value == 0)
+		value = 0x30;
 	switch (value) {
 		case 0x10:
 			dev_info(dev, "%s: zero tap disable\n", __func__);

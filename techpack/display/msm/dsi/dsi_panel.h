@@ -369,6 +369,7 @@ struct dsi_panel {
 
 	enum touch_state tp_state;
 	bool tp_state_check_enable;
+	bool tp_partial_off;
 
 	int glbl_rescode_top_ctrl;
 	int glbl_rescode_bot_ctrl;

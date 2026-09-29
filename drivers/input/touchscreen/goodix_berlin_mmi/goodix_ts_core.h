@@ -571,6 +571,12 @@ struct goodix_ts_core {
 	ktime_t last_event_time;
 #endif
 	unsigned short gesture_cmd;
+	/* double tap built from two single taps (fw lacks double tap) */
+	bool sw_double_tap;
+	ktime_t last_single_tap;
+	/* gesture mode recovery from a wedged IC */
+	int gesture_err_cnt;
+	int gesture_recover_cnt;
 	atomic_t pm_resume;
 	wait_queue_head_t pm_wq;
 

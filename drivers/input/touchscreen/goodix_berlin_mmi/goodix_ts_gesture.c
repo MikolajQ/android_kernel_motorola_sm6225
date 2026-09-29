@@ -24,6 +24,11 @@
 #include <linux/platform_device.h>
 #include <linux/version.h>
 #include <linux/delay.h>
+#include <linux/ktime.h>
+
+#define GOODIX_SW_DOUBLE_TAP_MS	400
+#define GOODIX_GESTURE_ERR_MAX		5
+#define GOODIX_GESTURE_RECOVER_MAX	3
 #include <linux/atomic.h>
 #include "goodix_ts_core.h"
 #include "goodix_ts_mmi.h"
@@ -248,18 +253,21 @@ static int gsx_gesture_ist(struct goodix_ts_core *cd,
 	ret = hw_ops->event_handler(cd, &gs_event);
 	if (ret) {
 		ts_err("failed get gesture data");
+		cd->gesture_err_cnt++;
 		goto re_send_ges_cmd;
 	}
 
 	if (!(gs_event.event_type & EVENT_GESTURE)) {
 		ts_err("invalid event type: 0x%x",
 			gs_event.event_type);
+		cd->gesture_err_cnt++;
 		goto re_send_ges_cmd;
 	}
 
 	if (QUERYBIT(gsx_gesture->gesture_type,
 		     gs_event.gesture_type)) {
 		gsx_gesture->gesture_data = gs_event.gesture_type;
+		cd->gesture_err_cnt = 0;
 #if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
 #ifdef GOODIX_PALM_SENSOR_EN
 		if (cd->set_mode.palm_detection) {
@@ -289,6 +297,28 @@ static int gsx_gesture_ist(struct goodix_ts_core *cd,
 			} else if(gs_event.gesture_type == GOODIX_GESTURE_DOUBLE_TAP) {
 				mmi_event.evcode =4;
 			}
+			if (cd->sw_double_tap && mmi_event.evcode == 1) {
+				ktime_t now = ktime_get();
+
+				if (cd->last_single_tap &&
+				    ktime_ms_delta(now, cd->last_single_tap) <=
+				    GOODIX_SW_DOUBLE_TAP_MS) {
+					cd->last_single_tap = 0;
+					mmi_event.evcode = 4;
+					ts_info("sw double tap\n");
+				} else {
+					/* first tap: keep it, wait for the second */
+					cd->last_single_tap = now;
+					goto gesture_ist_exit;
+				}
+			}
+
+			if (mmi_event.evcode == 4) {
+				input_report_key(cd->input_dev, KEY_WAKEUP, 1);
+				input_sync(cd->input_dev);
+				input_report_key(cd->input_dev, KEY_WAKEUP, 0);
+				input_sync(cd->input_dev);
+			}
 
 			/* call class method */
 			ret = cd->imports->report_gesture(&mmi_event);
@@ -311,6 +341,30 @@ static int gsx_gesture_ist(struct goodix_ts_core *cd,
 	}
 
 re_send_ges_cmd:
+	if (cd->sw_double_tap &&
+	    cd->gesture_err_cnt >= GOODIX_GESTURE_ERR_MAX) {
+		cd->gesture_err_cnt = 0;
+		if (cd->gesture_recover_cnt++ < GOODIX_GESTURE_RECOVER_MAX) {
+			/* IC wedged (e.g. touched while entering gesture
+			 * mode): only a power cycle brings it back */
+			ts_err("gesture: IC not responding, power cycle %d",
+				cd->gesture_recover_cnt);
+			hw_ops->power_on(cd, false);
+			msleep(50);
+			if (hw_ops->power_on(cd, true))
+				ts_err("gesture: power on failed");
+			goodix_ts_send_cmd(cd, ENTER_GESTURE_MODE_CMD, 6,
+					   0xFF, 0xFF);
+			if (hw_ops->gesture(cd, cd->gesture_cmd))
+				ts_err("gesture: re-arm failed");
+			cd->last_single_tap = 0;
+		} else if (atomic_cmpxchg(&cd->irq_enabled, 1, 0)) {
+			/* stop the IRQ storm until the screen turns on */
+			ts_err("gesture: giving up, irq off until resume");
+			disable_irq_nosync(cd->irq);
+		}
+		goto gesture_ist_exit;
+	}
 #if defined(PRODUCT_MIAMI)
 	gesture_cmd = 0x80;
 #elif defined(CONFIG_BOARD_USES_DOUBLE_TAP_CTRL)
