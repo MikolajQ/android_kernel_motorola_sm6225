@@ -32,6 +32,8 @@
 #include <linux/sysfs.h>
 #include <asm/sections.h>
 #include <soc/qcom/minidump.h>
+#include <linux/sched/task_stack.h>
+#include <linux/stackprotector.h>
 
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
@@ -697,8 +699,52 @@ device_initcall(register_warn_debugfs);
  * Called when gcc's -fstack-protector feature is used, and
  * gcc detects corruption of the on-stack canary value
  */
+#ifdef CONFIG_ARM64
+/*
+ * rhode diagnostics: dump the corrupted frame before panicking, so the value
+ * that overwrote the canary (pointer, fd, pattern...) ends up in pstore.
+ * Recurring panic: sde_crtc_atomic_set_property (27.09, 29.09, 01.10.2026).
+ */
+#define STACK_CHK_DUMP_BELOW	768
+#define STACK_CHK_DUMP_ABOVE	128
+
+static noinline void stack_chk_dump(unsigned long caller_fp)
+{
+	unsigned long base = (unsigned long)task_stack_page(current);
+	unsigned long top = base + THREAD_SIZE;
+	unsigned long start, end, p;
+
+	pr_emerg("stack-protector: comm=%s pid=%d cpu=%d guard=%016lx caller_fp=%016lx stack=[%016lx..%016lx]\n",
+		 current->comm, task_pid_nr(current), raw_smp_processor_id(),
+		 __stack_chk_guard, caller_fp, base, top);
+
+	if (caller_fp < base || caller_fp >= top) {
+		pr_emerg("stack-protector: caller frame not on task stack, no dump\n");
+		return;
+	}
+
+	start = max(base, caller_fp - STACK_CHK_DUMP_BELOW);
+	end = min(top, caller_fp + STACK_CHK_DUMP_ABOVE);
+
+	/* where a canary copy is still intact (other frames) */
+	for (p = start; p + sizeof(long) <= end; p += sizeof(long))
+		if (*(unsigned long *)p == __stack_chk_guard)
+			pr_emerg("stack-protector: guard intact at fp%+ld\n",
+				 (long)(p - caller_fp));
+
+	pr_emerg("stack-protector: fp-16 holds %016lx (canary slot for clang/arm64 frames)\n",
+		 *(unsigned long *)(caller_fp - 16));
+	print_hex_dump(KERN_EMERG, "stk ", DUMP_PREFIX_ADDRESS, 32, 8,
+		       (void *)start, end - start, false);
+}
+#endif
+
 __visible void __stack_chk_fail(void)
 {
+#ifdef CONFIG_ARM64
+	/* frame record of this function: [fp] = caller's fp */
+	stack_chk_dump(*(unsigned long *)__builtin_frame_address(0));
+#endif
 	panic("stack-protector: Kernel stack is corrupted in: %pB",
 		__builtin_return_address(0));
 }

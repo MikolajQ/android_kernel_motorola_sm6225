@@ -44,6 +44,96 @@
 #include "sde_core_perf.h"
 #include "sde_trace.h"
 
+/*
+ * rhode diagnostics: ring of recent sde_crtc_atomic_set_property() calls,
+ * printed on panic. This function hit "stack-protector: Kernel stack is
+ * corrupted" on 27.09, 29.09 and 01.10.2026 - knowing which property, value
+ * and caller were in flight narrows down who overwrote the canary.
+ */
+#include <linux/notifier.h>
+#include <linux/sched/clock.h>
+
+#define SDE_SETPROP_LOG_SIZE	32
+
+struct sde_setprop_rec {
+	u64 ts_in;
+	u64 ts_out;
+	u64 val;
+	const char *name;
+	pid_t pid;
+	int idx;
+	int ret;
+	int cpu_in;
+	int cpu_out;
+	char comm[TASK_COMM_LEN];
+};
+
+static struct sde_setprop_rec sde_setprop_log[SDE_SETPROP_LOG_SIZE];
+static atomic_t sde_setprop_pos = ATOMIC_INIT(-1);
+
+static struct sde_setprop_rec *sde_setprop_rec_begin(
+		struct drm_property *property, uint64_t val)
+{
+	struct sde_setprop_rec *rec;
+
+	rec = &sde_setprop_log[atomic_inc_return(&sde_setprop_pos) &
+			(SDE_SETPROP_LOG_SIZE - 1)];
+	rec->ts_out = 0;
+	rec->ts_in = local_clock();
+	rec->val = val;
+	rec->name = property->name;
+	rec->pid = task_pid_nr(current);
+	rec->idx = -1;
+	rec->ret = 0;
+	rec->cpu_in = raw_smp_processor_id();
+	rec->cpu_out = -1;
+	memcpy(rec->comm, current->comm, TASK_COMM_LEN);
+	return rec;
+}
+
+static void sde_setprop_rec_end(struct sde_setprop_rec *rec, int ret)
+{
+	rec->ret = ret;
+	rec->cpu_out = raw_smp_processor_id();
+	rec->ts_out = local_clock();
+}
+
+static int sde_setprop_panic_notify(struct notifier_block *nb,
+		unsigned long event, void *unused)
+{
+	int pos = atomic_read(&sde_setprop_pos);
+	int i;
+
+	pr_emerg("sde_setprop: last %d calls (oldest first, ts_out=0: still running)\n",
+			SDE_SETPROP_LOG_SIZE);
+	for (i = SDE_SETPROP_LOG_SIZE - 1; i >= 0; i--) {
+		struct sde_setprop_rec *rec =
+			&sde_setprop_log[(pos - i) & (SDE_SETPROP_LOG_SIZE - 1)];
+
+		if (!rec->name)
+			continue;
+		pr_emerg("sde_setprop: in=%llu out=%llu %s[%d] cpu %d->%d %s idx=%d val=0x%llx ret=%d\n",
+			rec->ts_in, rec->ts_out, rec->comm, rec->pid,
+			rec->cpu_in, rec->cpu_out, rec->name, rec->idx,
+			rec->val, rec->ret);
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block sde_setprop_panic_nb = {
+	.notifier_call = sde_setprop_panic_notify,
+};
+
+#ifndef MODULE
+static int __init sde_setprop_dbg_init(void)
+{
+	atomic_notifier_chain_register(&panic_notifier_list,
+			&sde_setprop_panic_nb);
+	return 0;
+}
+late_initcall(sde_setprop_dbg_init);
+#endif
+
 #define SDE_PSTATES_MAX (SDE_STAGE_MAX * 4)
 #define SDE_MULTIRECT_PLANE_MAX (SDE_STAGE_MAX * 2)
 
@@ -5406,6 +5496,7 @@ static int sde_crtc_atomic_set_property(struct drm_crtc *crtc,
 	int idx, ret;
 	uint64_t fence_user_fd;
 	uint64_t __user prev_user_fd;
+	struct sde_setprop_rec *rec;
 
 	if (unlikely(!crtc || !state || !property)) {
 		SDE_ERROR("invalid argument(s)\n");
@@ -5414,6 +5505,7 @@ static int sde_crtc_atomic_set_property(struct drm_crtc *crtc,
 
 	sde_crtc = to_sde_crtc(crtc);
 	cstate = to_sde_crtc_state(state);
+	rec = sde_setprop_rec_begin(property, val);
 
 	SDE_ATRACE_BEGIN("sde_crtc_atomic_set_property");
 	/* check with cp property system first */
@@ -5428,6 +5520,7 @@ static int sde_crtc_atomic_set_property(struct drm_crtc *crtc,
 		goto exit;
 
 	idx = msm_property_index(&sde_crtc->property_info, property);
+	rec->idx = idx;
 	switch (idx) {
 	case CRTC_PROP_INPUT_FENCE_TIMEOUT:
 		_sde_crtc_set_input_fence_timeout(cstate);
@@ -5516,6 +5609,7 @@ exit:
 	}
 
 	SDE_ATRACE_END("sde_crtc_atomic_set_property");
+	sde_setprop_rec_end(rec, ret);
 	return ret;
 }
 

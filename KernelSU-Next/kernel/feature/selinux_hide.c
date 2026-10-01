@@ -196,41 +196,63 @@ out:
 	return ret;
 }
 
+/*
+ * rhode 01.10: hook/unhook are serialized. ksu_selinux_hide_init() used to run
+ * twice (core/init.c and hook_manager.c), the two init threads raced past the
+ * unlocked orig_sel_open_handle_status check and the second one saved our own
+ * hook as the "original" -> my_sel_open_handle_status() called itself until
+ * the kernel stack overflowed (panic 29.09 12:10).
+ */
+static DEFINE_MUTEX(status_hook_mutex);
+
 static void hook_selinux_status_open(void)
 {
-	if (orig_sel_open_handle_status)
-	return;
-
 	struct file_operations *ops = NULL;
+
+	mutex_lock(&status_hook_mutex);
+	if (orig_sel_open_handle_status)
+		goto out;
+
 	if (resolve_fops("/sys/fs/selinux/status", &ops)) {
 		pr_err("ksu_selinux_hide: sel_handle_status_ops not found, fake status disabled\n");
-		return;
+		goto out;
 	}
 
 	if (!ops->open) {
 		pr_err("ksu_selinux_hide: sel_handle_status_ops->open is NULL\n");
-		return;
+		goto out;
 	}
-	
+
+	if (ops->open == my_sel_open_handle_status) {
+		pr_err("ksu_selinux_hide: open already points to our hook, refusing to chain it to itself\n");
+		goto out;
+	}
+
 	orig_sel_open_handle_status = ops->open;
 	patch_fops_open(ops, my_sel_open_handle_status);
 	pr_info("ksu_selinux_hide: hooked sel_handle_status_ops->open\n");
+out:
+	mutex_unlock(&status_hook_mutex);
 }
 
 static void unhook_selinux_status_open(void)
 {
-	if (!orig_sel_open_handle_status)
-	return;
-
 	struct file_operations *ops = NULL;
+
+	mutex_lock(&status_hook_mutex);
+	if (!orig_sel_open_handle_status)
+		goto out;
+
 	if (resolve_fops("/sys/fs/selinux/status", &ops)) {
 		pr_err("ksu_selinux_hide: sel_handle_status_ops not found on unhook\n");
-		return;
-}
+		goto out;
+	}
 
 	patch_fops_open(ops, orig_sel_open_handle_status);
 	orig_sel_open_handle_status = NULL;
 	pr_info("ksu_selinux_hide: unhooked sel_handle_status_ops->open\n");
+out:
+	mutex_unlock(&status_hook_mutex);
 }
 
 static int selinux_hide_status_feature_get(u64 *value)
@@ -294,6 +316,13 @@ page_ok:
 
 void __init ksu_selinux_hide_init(void)
 {
+	static bool initialized;
+
+	/* called from both core/init.c and hook_manager.c - run only once */
+	if (initialized)
+		return;
+	initialized = true;
+
 	if (ksu_register_feature_handler(&selinux_hide_status_handler))
 		pr_err("ksu_selinux_hide: failed to register feature handler\n");
 
