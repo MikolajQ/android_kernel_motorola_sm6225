@@ -41,13 +41,15 @@
 #define save_dst		x15
 #define save_src		x16
 #define offset_src_ptr		x17
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+/*
+ * Never use x18: it is the platform register, and with CONFIG_SHADOW_CALL_STACK
+ * (backported to android 4.19) it holds the shadow call stack pointer. The
+ * pre-5.4 variant used x18 here and returned with it set to 0..15, so the
+ * caller's next SCS push/pop went to a bogus address. x6 is a free scratch
+ * register in this routine (arguments are x0-x5).
+ */
 #define w_tmp_match_length	w6
 #define tmp_match_length	x6
-#else
-#define w_tmp_match_length	w18
-#define tmp_match_length	x18
-#endif
 
 /* x3 >= x4 src overflow */
 .macro check_src_overflow
