@@ -730,7 +730,7 @@ static int cw_update_data(struct cw_battery *cw_bat)
 	ret += cw_get_current(cw_bat);
 	ret += cw_get_cycle_count(cw_bat);
 	ret += cw_get_soh(cw_bat);
-	cw_printk("vol = %d  current = %ld cap = %d temp = %d raw_soc = %d age=%d\n",
+	pr_debug("FG_CW2217: vol = %d  current = %ld cap = %d temp = %d raw_soc = %d age=%d\n",
 		cw_bat->voltage, cw_bat->cw_current, cw_bat->ui_soc, cw_bat->temp, cw_bat->raw_soc, cw_bat->soh);
 
 	return ret;

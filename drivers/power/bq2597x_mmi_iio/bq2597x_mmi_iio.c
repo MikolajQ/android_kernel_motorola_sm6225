@@ -2569,7 +2569,6 @@ static int bq2597x_suspend(struct device *dev)
 	mutex_lock(&bq->irq_complete);
 	bq->resume_completed = false;
 	mutex_unlock(&bq->irq_complete);
-	pr_err("Suspend successfully!");
 
 	return 0;
 }
@@ -2591,7 +2590,6 @@ static int bq2597x_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bq2597x *bq = i2c_get_clientdata(client);
 
-	pr_err("Resume begin");
 	mutex_lock(&bq->irq_complete);
 	bq->resume_completed = true;
 	if (bq->irq_waiting) {
@@ -2603,9 +2601,13 @@ static int bq2597x_resume(struct device *dev)
 		mutex_unlock(&bq->irq_complete);
 	}
 
-	power_supply_changed(bq->fc2_psy);
-	pr_err("Resume successfully!");
-
+	/*
+	 * No unconditional power_supply_changed() here: an interrupt that
+	 * arrived during suspend is replayed above and reports its own
+	 * changes. Notifying on every resume sent a power_supply uevent
+	 * after each wakeup, making healthd re-read the battery and
+	 * system_server process it while nothing had changed.
+	 */
 	return 0;
 }
 static int bq2597x_charger_remove(struct i2c_client *client)

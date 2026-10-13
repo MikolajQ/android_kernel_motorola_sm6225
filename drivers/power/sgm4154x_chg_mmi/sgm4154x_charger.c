@@ -3680,7 +3680,7 @@ static int sgm4154x_suspend(struct device *dev)
 	struct sgm4154x_device *sgm = i2c_get_clientdata(client);
 
 	sgm->sgm4154x_suspend_flag = 1;
-	pr_info("sgm4154x PM_SUSPEND \n");
+	pr_debug("sgm4154x PM_SUSPEND \n");
 
 	return 0;
 }
@@ -3691,7 +3691,7 @@ static int sgm4154x_resume(struct device *dev)
 	struct sgm4154x_device *sgm = i2c_get_clientdata(client);
 
 	sgm->sgm4154x_suspend_flag = 0;
-	pr_info("sgm4154x PM_RESUME \n");
+	pr_debug("sgm4154x PM_RESUME \n");
 
 	return 0;
 }
