@@ -26,6 +26,7 @@
 #include "osif_sync.h"
 #include "qca_vendor.h"
 #include "wlan_osif_request_manager.h"
+#include <linux/moduleparam.h>
 
 /*
  * define short names for the global vendor params
@@ -61,6 +62,50 @@ wlan_hdd_apf_offload_policy[APF_MAX + 1] = {
 			 .len = MAX_APF_MEMORY_LEN},
 	[APF_PROG_LEN] = {.type = NLA_U32},
 };
+
+/*
+ * NetBIOS name queries (UDP 137, e.g. the network map of ASUS routers every ~20 s) wake the host while suspended:
+ * the Android APF program passes unicast UDP to our address, yet the phone runs no NetBIOS service and only answers
+ * with ICMP port unreachable. Prepend to every APF program a prefix "IPv4, UDP, destination port 136-139 -> DROP";
+ * everything else falls through to the unchanged program (APF jumps are relative and the PASS/DROP labels are the
+ * end of the program).
+ * Disable: echo N > /sys/module/wlan/parameters/apf_netbios_drop (applies from the next program install).
+ */
+static bool apf_netbios_drop = true;
+module_param(apf_netbios_drop, bool, 0644);
+MODULE_PARM_DESC(apf_netbios_drop, "Drop NetBIOS (UDP 136-139) in the APF program while suspended");
+
+#define APF_NB_PREFIX_LEN 40
+/* leave room for the APFv4 data region (counters) at the end of memory; longer programs get no prefix */
+#define APF_NB_MAX_PROG_LEN 1536
+
+static void hdd_apf_nb_prefix(uint8_t *b, uint32_t orig_len)
+{
+	static const uint8_t p[APF_NB_PREFIX_LEN] = {
+		0x12, 0x0c,			/* ldh  r0, [12]	ethertype */
+		0x84, 0x00, 0x1f, 0x08, 0x00,	/* jne  r0, 0x0800, cont */
+		0x0a, 0x17,			/* ldb  r0, [23]	IP protocol */
+		0x82, 0x1a, 0x11,		/* jne  r0, 17, cont */
+		0x12, 0x14,			/* ldh  r0, [20]	flags + fragment offset */
+		0x9c, 0x00, 0x13, 0x1f, 0xff,	/* jset r0, 0x1fff, cont  (no UDP header) */
+		0x0a, 0x0e,			/* ldb  r0, [14] */
+		0x52, 0x0f,			/* and  r0, 15 */
+		0x42, 0x04,			/* mul  r0, 4		IPv4 header length */
+		0xab, 0x23,			/* mov  r1, r0 */
+		0x2a, 0x10,			/* ldhx r0, [r1+16]	UDP destination port */
+		0x92, 0x06, 0x88,		/* jlt  r0, 136, cont */
+		0x8a, 0x03, 0x8b,		/* jgt  r0, 139, cont */
+		0x74, 0x00, 0x00,		/* jmp  drop (filled in below) */
+		0x68,				/* cont: li r0, 0 */
+		0x69,				/*       li r1, 0 */
+	};
+	/* drop = new length + 1, relative to the end of jmp (byte 38) */
+	uint32_t j = orig_len + APF_NB_PREFIX_LEN + 1 - 38;
+
+	qdf_mem_copy(b, p, APF_NB_PREFIX_LEN);
+	b[36] = j >> 8;
+	b[37] = j & 0xff;
+}
 
 void hdd_apf_context_init(struct hdd_adapter *adapter)
 {
@@ -282,6 +327,32 @@ static int hdd_set_reset_apf_offload(struct hdd_context *hdd_ctx,
 	}
 	apf_set_offload.current_offset = nla_get_u32(tb[APF_CURRENT_OFFSET]);
 
+	/* the program may arrive in chunks: prefix goes into the chunk at offset 0, the rest shifts */
+	if (apf_netbios_drop &&
+	    apf_set_offload.total_length + APF_NB_PREFIX_LEN <= APF_NB_MAX_PROG_LEN) {
+		uint32_t orig_len = apf_set_offload.total_length;
+
+		if (!apf_set_offload.current_offset) {
+			uint8_t *prog = qdf_mem_malloc(prog_len + APF_NB_PREFIX_LEN);
+
+			if (!prog) {
+				ret = -ENOMEM;
+				goto fail;
+			}
+			hdd_apf_nb_prefix(prog, orig_len);
+			qdf_mem_copy(prog + APF_NB_PREFIX_LEN,
+				     apf_set_offload.program, prog_len);
+			qdf_mem_free(apf_set_offload.program);
+			apf_set_offload.program = prog;
+			apf_set_offload.current_length = prog_len + APF_NB_PREFIX_LEN;
+			pr_info("wlan: APF NetBIOS prefix (set): %u -> %u bytes\n",
+				orig_len, orig_len + APF_NB_PREFIX_LEN);
+		} else {
+			apf_set_offload.current_offset += APF_NB_PREFIX_LEN;
+		}
+		apf_set_offload.total_length = orig_len + APF_NB_PREFIX_LEN;
+	}
+
 post_sme:
 	hdd_debug("Posting, session_id: %d APF Version: %d filter ID: %d total_len: %d current_len: %d offset: %d",
 		  apf_set_offload.session_id, apf_set_offload.version,
@@ -391,6 +462,48 @@ hdd_apf_write_memory(struct hdd_adapter *adapter, struct nlattr **tb)
 		   write_mem_params.length);
 
 	write_mem_params.apf_version = hdd_ctx->apf_version;
+
+	/*
+	 * APFv4 work memory: the program [0, program_len) moves up by the prefix length, bytes from program_len + prefix
+	 * on (gap and the data region at the end) stay in place, the prefix-sized gap right after the program is dropped.
+	 * Each chunk therefore still maps to one contiguous chunk.
+	 */
+	if (apf_netbios_drop && write_mem_params.program_len &&
+	    write_mem_params.program_len + APF_NB_PREFIX_LEN <= APF_NB_MAX_PROG_LEN) {
+		uint32_t plen = write_mem_params.program_len;
+		uint32_t off = write_mem_params.addr_offset;
+		uint32_t end = off + write_mem_params.length;
+		uint32_t a_len = off < plen ? QDF_MIN(end, plen) - off : 0;
+		uint32_t b_start = QDF_MAX(off, plen + APF_NB_PREFIX_LEN);
+		uint32_t b_len = b_start < end ? end - b_start : 0;
+		uint32_t pre = off ? 0 : APF_NB_PREFIX_LEN;
+		uint32_t new_len = pre + a_len + b_len;
+		uint8_t *nbuf;
+
+		if (!new_len) {	/* only the dropped gap */
+			qdf_mem_free(write_mem_params.buf);
+			return 0;
+		}
+		nbuf = qdf_mem_malloc(new_len);
+		if (!nbuf) {
+			qdf_mem_free(write_mem_params.buf);
+			return -ENOMEM;
+		}
+		if (pre)
+			hdd_apf_nb_prefix(nbuf, plen);
+		qdf_mem_copy(nbuf + pre, write_mem_params.buf, a_len);
+		qdf_mem_copy(nbuf + pre + a_len,
+			     write_mem_params.buf + (b_start - off), b_len);
+		qdf_mem_free(write_mem_params.buf);
+		write_mem_params.buf = nbuf;
+		write_mem_params.length = new_len;
+		write_mem_params.addr_offset = !off ? 0 :
+					       off < plen ? off + APF_NB_PREFIX_LEN : b_start;
+		write_mem_params.program_len = plen + APF_NB_PREFIX_LEN;
+		if (pre)
+			pr_info("wlan: APF NetBIOS prefix (write): %u -> %u bytes\n",
+				plen, plen + APF_NB_PREFIX_LEN);
+	}
 
 	status = sme_apf_write_work_memory(hdd_adapter_get_mac_handle(adapter),
 					   &write_mem_params);
