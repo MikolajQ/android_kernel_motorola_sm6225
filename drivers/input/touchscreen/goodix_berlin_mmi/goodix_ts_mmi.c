@@ -1077,6 +1077,21 @@ static int goodix_ts_mmi_panel_state(struct device *dev,
 		/* if (hw_ops->suspend)
 		       hw_ops->suspend(core_data);
 		 */
+		if (from == TS_MMI_PM_GESTURE && core_data->gesture_enabled) {
+			/*
+			 * Gestures disabled while the display stays off. The
+			 * panel keeps the touch IO rail on for this off cycle,
+			 * so the IC would go on scanning: undo the gesture
+			 * setup, wake it from gesture mode and send it to
+			 * sleep. Resume resets it as after gesture mode.
+			 */
+			hw_ops->irq_enable(core_data, false);
+			disable_irq_wake(core_data->irq);
+			hw_ops->reset(core_data, GOODIX_NORMAL_RESET_DELAY_MS);
+			if (hw_ops->suspend)
+				hw_ops->suspend(core_data);
+			ts_info("gesture mode -> sleep");
+		}
 		core_data->gesture_enabled = false;
 		break;
 	case TS_MMI_PM_ACTIVE:

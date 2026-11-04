@@ -93,6 +93,43 @@ static int ts_mmi_panel_off(struct ts_mmi_dev *touch_cdev) {
 	return 0;
 }
 
+/*
+ * Gestures were disabled while the display is off: leave gesture mode for
+ * deep sleep, the same state ts_mmi_panel_off() picks when no gesture is
+ * enabled. Runs in the worker, so it is serialized with the queued resume,
+ * and ts_mmi_panel_off() cancels the worker before touching the IC.
+ */
+static void ts_mmi_gesture_off(struct ts_mmi_dev *touch_cdev)
+{
+	int ret = 0;
+
+	mutex_lock(&touch_cdev->extif_mutex);
+	if (!is_touch_stopped || !IS_GESTURE_MODE ||
+	    touch_cdev->gesture_mode_type ||
+	    touch_cdev->pdata.support_liquid_detection) {
+		mutex_unlock(&touch_cdev->extif_mutex);
+		return;
+	}
+
+	dev_info(DEV_MMI, "%s: gestures disabled while display is off, enter Deepsleep mode\n", __func__);
+	TRY_TO_CALL(panel_state, touch_cdev->pm_mode, TS_MMI_PM_DEEPSLEEP);
+	TRY_TO_CALL(drv_irq, TS_MMI_IRQ_OFF);
+	touch_cdev->pm_mode = TS_MMI_PM_DEEPSLEEP;
+	/*
+	 * What PRE_DISPLAY_OFF and DISPLAY_OFF do for deep sleep, so that the
+	 * resume path (power on, wait for ready, IRQ on) finds the same state.
+	 */
+	if (NEED_TO_SET_PINCTRL)
+		TRY_TO_CALL(pinctrl, TS_MMI_PINCTL_OFF);
+	if (NEED_TO_SET_POWER)
+		TRY_TO_CALL(power, TS_MMI_POWER_OFF);
+#if defined(CONFIG_PANEL_NOTIFICATIONS)
+	/* the panel already kept vddio for this off cycle; release it next time */
+	touch_set_state(0, TOUCH_PANEL_IDX_PRIMARY);
+#endif
+	mutex_unlock(&touch_cdev->extif_mutex);
+}
+
 static int inline ts_mmi_panel_on(struct ts_mmi_dev *touch_cdev) {
 	atomic_set(&touch_cdev->resume_should_stop, 0);
 	kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_RESUME);
@@ -387,6 +424,10 @@ static void ts_mmi_worker_func(struct work_struct *w)
 
 		case TS_MMI_DO_LIQUID_DETECTION:
 				TRY_TO_CALL(update_liquid_detect_mode, touch_cdev->lpd_state);
+				break;
+
+		case TS_MMI_DO_GESTURE_OFF:
+				ts_mmi_gesture_off(touch_cdev);
 				break;
 
 		default:

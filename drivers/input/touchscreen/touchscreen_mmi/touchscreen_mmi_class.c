@@ -386,6 +386,16 @@ static ssize_t gesture_store(struct device *dev,
 			dev_info(dev, "%s: unsupport gesture mode type\n", __func__);
 			;
 	}
+	/*
+	 * The low power mode is only chosen when the display goes off. If the
+	 * last gesture is disabled while it is already off (e.g. DT2W turned
+	 * off by a night schedule), let the worker move the IC to deep sleep
+	 * now instead of keeping it in gesture mode until the next off cycle.
+	 */
+	if (is_touch_stopped && !touch_cdev->gesture_mode_type) {
+		kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_GESTURE_OFF);
+		schedule_delayed_work(&touch_cdev->work, 0);
+	}
 	mutex_unlock(&touch_cdev->extif_mutex);
 	dev_info(dev, "%s: gesture_mode_type = 0x%02x \n", __func__, touch_cdev->gesture_mode_type);
 
