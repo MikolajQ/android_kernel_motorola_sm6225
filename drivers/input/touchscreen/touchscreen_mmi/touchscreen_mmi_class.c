@@ -396,6 +396,15 @@ static ssize_t gesture_store(struct device *dev,
 		kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_GESTURE_OFF);
 		schedule_delayed_work(&touch_cdev->work, 0);
 	}
+	/*
+	 * And the other way round: a gesture enabled while the display is off
+	 * and the IC is in deep sleep (e.g. DT2W turned back on in the morning)
+	 * would otherwise only work after the next display on/off cycle.
+	 */
+	if (is_touch_stopped && touch_cdev->gesture_mode_type) {
+		kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_GESTURE_ON);
+		schedule_delayed_work(&touch_cdev->work, 0);
+	}
 	mutex_unlock(&touch_cdev->extif_mutex);
 	dev_info(dev, "%s: gesture_mode_type = 0x%02x \n", __func__, touch_cdev->gesture_mode_type);
 

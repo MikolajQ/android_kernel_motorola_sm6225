@@ -130,6 +130,48 @@ static void ts_mmi_gesture_off(struct ts_mmi_dev *touch_cdev)
 	mutex_unlock(&touch_cdev->extif_mutex);
 }
 
+/*
+ * A gesture was enabled while the display is off and the IC is in deep sleep:
+ * enter gesture mode now, as ts_mmi_panel_off() would have done had the
+ * gesture been enabled before the display went off. In deep sleep the IC may
+ * be powered off, and with it its IO supply if that is shared with the panel,
+ * so the vendor driver powers it on in panel_state(DEEPSLEEP -> GESTURE) and
+ * fails if it cannot (then gesture mode starts at the next display off). Runs
+ * in the worker like ts_mmi_gesture_off().
+ */
+static void ts_mmi_gesture_on(struct ts_mmi_dev *touch_cdev)
+{
+	int ret = 0;
+
+	mutex_lock(&touch_cdev->extif_mutex);
+	if (!is_touch_stopped || !IS_DEEPSLEEP_MODE ||
+	    !touch_cdev->gesture_mode_type) {
+		mutex_unlock(&touch_cdev->extif_mutex);
+		return;
+	}
+
+	dev_info(DEV_MMI, "%s: gestures enabled while display is off, try to enter Gesture mode\n", __func__);
+	if (NEED_TO_SET_PINCTRL)
+		TRY_TO_CALL(pinctrl, TS_MMI_PINCTL_ON);
+	ret = 0;
+	TRY_TO_CALL(panel_state, TS_MMI_PM_DEEPSLEEP, TS_MMI_PM_GESTURE);
+	if (ret) {
+		dev_info(DEV_MMI, "%s: not possible now (%d), Gesture mode from the next display off\n", __func__, ret);
+		if (NEED_TO_SET_PINCTRL)
+			TRY_TO_CALL(pinctrl, TS_MMI_PINCTL_OFF);
+		mutex_unlock(&touch_cdev->extif_mutex);
+		return;
+	}
+	/* panel_state() set up the IRQ and its wake source as for gesture mode */
+	touch_cdev->pm_mode = TS_MMI_PM_GESTURE;
+#if defined(CONFIG_PANEL_NOTIFICATIONS)
+	/* keep the panel IO supply on in the next display off cycles */
+	touch_set_state(1, TOUCH_PANEL_IDX_PRIMARY);
+#endif
+	mutex_unlock(&touch_cdev->extif_mutex);
+	dev_info(DEV_MMI, "%s: done\n", __func__);
+}
+
 static int inline ts_mmi_panel_on(struct ts_mmi_dev *touch_cdev) {
 	atomic_set(&touch_cdev->resume_should_stop, 0);
 	kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_RESUME);
@@ -428,6 +470,10 @@ static void ts_mmi_worker_func(struct work_struct *w)
 
 		case TS_MMI_DO_GESTURE_OFF:
 				ts_mmi_gesture_off(touch_cdev);
+				break;
+
+		case TS_MMI_DO_GESTURE_ON:
+				ts_mmi_gesture_on(touch_cdev);
 				break;
 
 		default:

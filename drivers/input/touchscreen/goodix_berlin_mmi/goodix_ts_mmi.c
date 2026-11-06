@@ -1063,6 +1063,28 @@ static int goodix_ts_mmi_panel_state(struct device *dev,
 
 	switch (to) {
 	case TS_MMI_PM_GESTURE:
+		if (from == TS_MMI_PM_DEEPSLEEP) {
+			/*
+			 * Gesture enabled while the display stays off and the
+			 * IC was powered off for deep sleep. Power it on here;
+			 * only possible when this driver holds the IO supply
+			 * itself, otherwise it may be the panel's and off.
+			 */
+			int ret;
+
+			if (!core_data->iovdd && core_data->board_data.iovdd_gpio <= 0)
+				return -EOPNOTSUPP;
+			ret = goodix_ts_power_on(core_data);
+			if (ret)
+				return ret;
+			/*
+			 * The firmware is still starting right after power on
+			 * (commands get "busy" acks): reset and wait for it as
+			 * resume does.
+			 */
+			hw_ops->reset(core_data, GOODIX_NORMAL_RESET_DELAY_MS);
+			ts_info("deep sleep -> gesture mode");
+		}
 		hw_ops->irq_enable(core_data, false);
 		if (hw_ops->gesture) {
 			goodix_berlin_gesture_setup(core_data);
